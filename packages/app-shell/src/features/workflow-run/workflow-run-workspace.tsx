@@ -64,6 +64,7 @@ import { runStatusTone } from "./run-status-style";
 import type { WorkflowRunViewMode } from "./run-view-mode";
 import { WorkflowRunStartDialog } from "./workflow-run-start-dialog";
 import { ResumeRunDialog } from "./resume-run-dialog";
+import { RunDebugDisclosure, type RunDebugSession } from "./run-debug-panel";
 import { LocationActionsButton } from "../workspace/location-actions-button";
 import {
   WorkspaceReviewLayout,
@@ -75,13 +76,17 @@ const NARROW_THEATER_INSPECTOR_AUTO_OPEN_WIDTH = 1_000;
 
 interface WorkflowRunWorkspaceProps {
   runId: string;
+  debugSession?: RunDebugSession;
 }
 
 /**
  * Graph workflow run workspace: Theater / Overview.
  * Outcomes open in the Theater act inspector rail.
  */
-export function WorkflowRunWorkspace({ runId }: WorkflowRunWorkspaceProps) {
+export function WorkflowRunWorkspace({
+  runId,
+  debugSession,
+}: WorkflowRunWorkspaceProps) {
   const { t } = useTranslation();
   const showContractError = useContractErrorToast();
   const sidebarCollapsed = useUiStore((s) => s.sidebarCollapsed);
@@ -703,6 +708,13 @@ export function WorkflowRunWorkspace({ runId }: WorkflowRunWorkspaceProps) {
         <LocationActionsButton workspaceId={workspaceId} />
         <WindowControls />
       </header>
+      {run && run.status !== "pending" && (
+        <RunDebugDisclosure
+          key={runId}
+          runId={runId}
+          session={debugSession?.runId === runId ? debugSession : undefined}
+        />
+      )}
       {unrecognizedNodes.length > 0 && (
         <p
           role="status"
