@@ -1,5 +1,7 @@
 //! Exercises prompt policy through the production admission, ACP peer, router, and session actor.
 
+#[path = "discovery_tests.rs"]
+mod discovery_tests;
 #[path = "plugin_replacement_tests.rs"]
 mod plugin_replacement_tests;
 #[path = "prompt_policy_tests/restore_replay.rs"]
@@ -504,18 +506,21 @@ fn prompt(id: &str) -> PromptSessionRequest {
 /// Runs production spans and events under one scoped TRACE subscriber and controllable clock.
 fn run_case(test: impl Future<Output = ()>) {
     ora_logging::initialize_test_clock();
-    ora_logging::with_trace_logging(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .start_paused(/*start_paused*/ true)
-            .build()
-            .unwrap()
-            .block_on(async {
-                tokio::time::timeout(Duration::from_secs(86400), test)
-                    .await
-                    .expect("policy test must settle within one virtual day");
-            });
-    });
+    ora_logging::with_trace_logging(|| block_on_paused_clock(test));
+}
+
+/// Drives a case on a controllable clock under whatever subscriber its caller installed.
+fn block_on_paused_clock(test: impl Future<Output = ()>) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(/*start_paused*/ true)
+        .build()
+        .unwrap()
+        .block_on(async {
+            tokio::time::timeout(Duration::from_secs(86400), test)
+                .await
+                .expect("policy test must settle within one virtual day");
+        });
 }
 
 /// Reads past ordinary setup/update traffic to assert a terminal production response.
@@ -2288,8 +2293,11 @@ fn subagent_frames_stop_renewing_once_the_parent_delegation_completed() {
 
 mod restored_sessions {
     mod command_catalog_tests;
+    mod command_limit_tests;
     mod follower_retry_tests;
     mod follower_setup_tests;
+    mod set_config_tests;
+    mod setup_options_tests;
     use super::*;
     use pretty_assertions::assert_eq;
     /// Holds two or more sessions on one real routed ACP peer with a controllable provider.
@@ -2443,6 +2451,25 @@ mod restored_sessions {
             }
         }
 
+        /// Persists a session bound to this agent, with no actor serving it.
+        fn seed_session_on(&self, id: &str, agent_ref: &str) -> Session {
+            self.manager
+                .inner
+                .store
+                .create_session(Session::new(
+                    SessionId::new(id),
+                    WorkspaceId::new("workspace"),
+                    AgentRef::parse(agent_ref).unwrap(),
+                    id,
+                    SessionStatus::Running,
+                    SessionMcpSelection::Automatic,
+                    AuditFields::new(
+                        /*created_at*/ 0, /*updated_at*/ 0, /*is_deleted*/ false,
+                    ),
+                ))
+                .unwrap()
+        }
+
         /// Seeds an already attached session so the test measures prompt policy rather than setup.
         fn add_session(&self, id: &str) {
             self.add_session_with_title_acquisition(id, crate::TitleAcquisition::disabled());
@@ -2483,22 +2510,7 @@ mod restored_sessions {
             channel: Option<crate::routing::SessionChannel>,
             live_mcp: LiveMcpState,
         ) {
-            let session = self
-                .manager
-                .inner
-                .store
-                .create_session(Session::new(
-                    SessionId::new(id),
-                    WorkspaceId::new("workspace"),
-                    AgentRef::parse("official/test.agent").unwrap(),
-                    id,
-                    SessionStatus::Running,
-                    SessionMcpSelection::Automatic,
-                    AuditFields::new(
-                        /*created_at*/ 0, /*updated_at*/ 0, /*is_deleted*/ false,
-                    ),
-                ))
-                .unwrap();
+            let session = self.seed_session_on(id, "official/test.agent");
             let recorder = self.manager.open_recorder(&session).unwrap().recorder;
             self.manager
                 .insert_actor(
