@@ -24,6 +24,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(test)]
+mod debug_fence_tests;
+#[cfg(test)]
 mod precheck_tests;
 #[cfg(test)]
 mod tests;
@@ -83,12 +85,9 @@ impl WorkflowRuns {
         request: GetWorkflowDebugAttemptRequest,
     ) -> Result<GetWorkflowDebugAttemptResponse, BackendError> {
         let store = ora_db::workflow_debug::WorkflowDebugStore::new(self.pool.clone());
-        store.attempt(&request).map_err(|error| {
-            ApplicationError::WorkflowRunRepository {
-                source: ora_application::RepositoryError::new(error),
-            }
-            .into()
-        })
+        store
+            .attempt(&request)
+            .map_err(BackendError::from_debug_store)
     }
 
     /// Reads durable workflow debug confirmations in order.
@@ -100,12 +99,7 @@ impl WorkflowRuns {
         store
             .history(&request.run_id)
             .map(|entries| GetWorkflowDebugHistoryResponse { entries })
-            .map_err(|error| {
-                ApplicationError::WorkflowRunRepository {
-                    source: ora_application::RepositoryError::new(error),
-                }
-                .into()
-            })
+            .map_err(BackendError::from_debug_store)
     }
 
     /// Plans a read-only debug preview of an edit from a selected execution position.
@@ -239,14 +233,24 @@ impl WorkflowRuns {
         let run_id = ora_domain::WorkflowRunId::new(&request.run_id);
         let engine = self.engine.clone();
         let run_locks = self.run_locks.clone();
-        let response = spawn_repository_work(move || {
+        let pool = self.pool.clone();
+        let (response, was_running) = spawn_repository_work(move || {
             // Serialize the `Cancelled` transition against every other mutation for the run; the
             // async session cleanup below runs outside the gate.
             let _gate = run_locks.acquire_exclusive(request.run_id.clone());
-            engine.cancel(request).map_err(BackendError::from)
+            let was_running = SqliteWorkflowRunEngineRepository::new(pool)
+                .find_execution_context(&ora_domain::WorkflowRunId::new(&request.run_id))
+                .map_err(|source| ApplicationError::WorkflowRunRepository { source })?
+                .is_some_and(|ctx| ctx.run.status == ora_domain::WorkflowRunStatus::Running);
+            Ok((
+                engine.cancel(request).map_err(BackendError::from)?,
+                was_running,
+            ))
         })
         .await?;
-        self.stop_workflow_run_sessions(&run_id).await;
+        if was_running {
+            self.stop_workflow_run_sessions(&run_id).await;
+        }
         Ok(response)
     }
 
@@ -568,7 +572,9 @@ impl WorkflowRuns {
         let _gate = self.run_locks.acquire_exclusive(request.run_id.clone());
         self.debug.ensure_no_fence(&request.run_id)?;
         self.precheck_dependencies(&request.run_id, StartOperation::Restart)?;
-        self.engine.restart(request).map_err(BackendError::from)
+        self.engine
+            .restart(request)
+            .map_err(BackendError::from_run_use_case)
     }
 
     /// Resumes a failed or cancelled workflow run from its failed nodes.
