@@ -314,6 +314,11 @@ never read by scheduling, resume, rollback or snapshot switching.
 
 ## Querying run-local debug history
 
+Open **Debug history for this run** on the run page to see accepted operations. Expand an operation
+to inspect its impact and patch. Select an execution ID to see the configuration recorded at dispatch,
+its revision when known, and whether a later operation superseded it. The same details are available
+from the selected execution in Theater. **Refresh run records** reads the history again.
+
 `workflowRun.debugHistory({ runId })` returns confirmations in acceptance order with the request key, preview, patch and phase. An applied edit identifies its parent and resulting revisions. A failed stop retains its reason and the attempts that could not be proven stopped (`unsettledNodeRunIds`). Each entry also records the status and error the run had when it was accepted (`priorRunStatus`, `priorError`): a failed, cancelled or succeeded run keeps them while the stop is in flight and returns to `running` in the commit that applies the revision. After reconnecting, the request key identifies the same operation. While a stop is in progress or failed without a released fence, new previews, new confirmations, failure recovery, a whole-run restart and a snapshot switch are refused with `workflow_debug_operation_active`. Refusals reach the page as typed public errors: `workflow_debug_stale_preview`, `workflow_debug_operation_active`, `workflow_debug_request_conflict`, `workflow_debug_patch_invalid` with the field path and reason, and `workflow_debug_target_rejected` with the missing fact or position.
 
 `workflowRun.debugAttempt({ runId, nodeRunId })` also reads superseded attempts. It returns the round or item, configuration revision, outcome and availability of recorded input. The third foreach item has `index=2`, and the third while round has `round=3`. Pre-upgrade attempts without a recorded association return null configuration and revision.

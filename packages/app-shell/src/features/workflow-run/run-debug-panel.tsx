@@ -43,10 +43,16 @@ export interface RunDebugSession {
   refresh(): Promise<void>;
 }
 
-function Operation({ operation }: { operation: WorkflowDebugOperation }) {
+function Operation({
+  operation,
+  live = false,
+}: {
+  operation: WorkflowDebugOperation;
+  live?: boolean;
+}) {
   const { t } = useTranslation();
   return (
-    <p role="status">
+    <p role={live ? "status" : undefined}>
       {operation.state === "applied"
         ? t("workflowRun.debug.applied", { revision: operation.revision })
         : operation.state === "stopping"
@@ -177,7 +183,7 @@ function Edit({
       {error && !operation && <p role="alert">{error}</p>}
       {refreshError && <p role="alert">{refreshError}</p>}
       {operation ? (
-        <Operation operation={operation} />
+        <Operation operation={operation} live />
       ) : ticket ? (
         <>
           <Impact preview={ticket.preview} />

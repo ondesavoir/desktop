@@ -215,6 +215,51 @@ it("drops late previews on reselection, forwards a pending target and requires a
   await user.click(screen.getByRole("button", { name: "Cancel" }));
   expect(session.commit).toHaveBeenCalledTimes(1);
 });
+
+it("adopts a persisted receipt after losing the confirmation response without committing again", async () => {
+  const user = userEvent.setup();
+  const session = example();
+  session.commit.mockRejectedValueOnce(new Error("connection closed"));
+  const view = render(<RunDebugPanel session={session} />);
+  await edit(user, "Container");
+  await user.click(confirm());
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "retry the same request",
+  );
+  expect(session.refresh).toHaveBeenCalledTimes(1);
+  const { requestId } = session.commit.mock.calls[0][0];
+  view.rerender(
+    <RunDebugPanel
+      session={{
+        ...session,
+        history: [
+          {
+            preview,
+            patch: [],
+            firstNodeRunId: null,
+            priorError: null,
+            priorRunStatus: "running",
+            operation: {
+              state: "applied",
+              revision: 1,
+              operationId: "op1",
+              baseRevision: 0,
+              requestId,
+            },
+          },
+        ],
+      }}
+    />,
+  );
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "Revision 1 is in effect.",
+  );
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(
+    screen.queryByRole("button", { name: /Confirm and continue/ }),
+  ).toBeNull();
+  expect(session.commit).toHaveBeenCalledTimes(1);
+});
 it("reopens a persisted stop failure without submitting again", async () => {
   const user = userEvent.setup(),
     session = example();
@@ -243,9 +288,7 @@ it("reopens a persisted stop failure without submitting again", async () => {
     />,
   );
   await user.click(screen.getByText(/op-3/));
-  expect(screen.getByRole("status")).toHaveTextContent(
-    /session still writing.*nr-3/,
-  );
+  expect(screen.getByText(/session still writing.*nr-3/)).toBeVisible();
   expect(session.commit).not.toHaveBeenCalled();
 });
 
