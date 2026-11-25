@@ -312,6 +312,12 @@ A node replaced by automatic retries rolls back as one unit with every attempt o
 (`payload.retry_chain`). On-demand AI diagnosis writes `payload.ai_diagnosis`, labelled as a guess and
 never read by scheduling, resume, rollback or snapshot switching.
 
+## Querying run-local debug history
+
+`workflowRun.debugHistory({ runId })` returns confirmations in acceptance order with the request key, preview, patch and phase. An applied edit identifies its parent and resulting revisions. A failed stop retains its reason. After reconnecting, the request key identifies the same operation.
+
+`workflowRun.debugAttempt({ runId, nodeRunId })` also reads superseded attempts. It returns the round or item, configuration revision, outcome and availability of recorded input. The third foreach item has `index=2`, and the third while round has `round=3`. Pre-upgrade attempts without a recorded association return null configuration and revision.
+
 ## Recovery after restart
 
 Desktop runs the boot sweep only after it holds the application instance lock (see
@@ -320,3 +326,5 @@ work as interrupted. Interrupted outer rows fail as `interrupted_by_restart` and
 interrupted rows inside a running container fail while the container and run survive, and the round
 settles as failed. Valid interactive waits are preserved, and tools with unknown side effects are never
 replayed automatically.
+
+A debug preview selects an existing attempt by `nodeRunId` or an undispatched position by `pendingTarget: { rootScopeId, scopeId, nodeId }`. A pending foreach member also requires `containerNodeRunId` and its zero-based `index`. Preview checks the scheduler’s ready projection. If normal dispatch wins before confirmation, refresh the view and select the recorded attempt. An independent sibling can advance while the target and its dependencies stay valid. Container previews include the member configurations that will apply at the new entrance.
