@@ -82,6 +82,19 @@ pub(super) fn prepare(
         .and_then(|node| node.get_mut("data"))
         .ok_or(DebugRejection::InvalidTarget)?;
     replace(data, &kind, &request.patch)?;
+    // Debug edits select a declared root array. Report the field before whole-graph
+    // validation reduces an object-rooted selector to a generic graph error.
+    if kind == "iteration"
+        && data["iterationConfig"]["iteratorSelector"]
+            .as_array()
+            .is_some_and(|parts| parts.len() > 2)
+    {
+        return Err(invalid(
+            "/iterationConfig/iteratorSelector",
+            "select a declared root array instead of a nested path",
+        )
+        .into());
+    }
     let candidate =
         WorkflowGraph::parse(&graph.to_string()).map_err(|e| invalid("", &e.to_string()))?;
     // Foreach reuses root-pool selector names. A value left by a skipped producer in a

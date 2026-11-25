@@ -184,7 +184,7 @@ fn bind_graph(db: &Connection, graph: Value) -> Result<(), DatabaseError> {
 fn item_three_uses_its_own_input_and_revision_suffix() {
     let (_temp, _path, store) = fixture();
     let graph = json!({"nodes":[
-        {"id":"start","data":{"kind":"start","inputVariables":[{"name":"items","valueType":"array[string]"},{"name":"reordered","valueType":"array[string]"}]}},
+        {"id":"start","data":{"kind":"start","inputVariables":[{"name":"items","valueType":"array[string]"},{"name":"reordered","valueType":"array[string]"},{"name":"envelope","valueType":"object"}]}},
         {"id":"iter","data":{"kind":"iteration","iterationConfig":{"iteratorSelector":["start","items"],"collectSelector":["agent","output"]}}},
         {"id":"agent","parentId":"iter","data":{"kind":"agent","agentConfig":{"executor":{"agentCli":"cli","modelId":"m"},"prompt":"{{#iter.item#}}"}}},
         {"id":"out","data":{"kind":"output","outputs":[{"name":"result","variableSelector":["iter","output"]}]}}],
@@ -201,6 +201,13 @@ fn item_three_uses_its_own_input_and_revision_suffix() {
                 payload.variable_pool.declare(key, "array[string]", "start");
                 payload.variable_pool.set(key, "start", value).unwrap();
             }
+            payload
+                .variable_pool
+                .declare("start.envelope", "object", "start");
+            payload
+                .variable_pool
+                .set("start.envelope", "start", json!({"items":["e","c"]}))
+                .unwrap();
             db.execute(
                 "UPDATE workflow_runs SET payload=?1 WHERE id='other'",
                 [serde_json::to_string(&payload)?],
@@ -331,6 +338,13 @@ fn item_three_uses_its_own_input_and_revision_suffix() {
     );
     let container_request=serde_json::from_value(json!({"runId":"other","nodeRunId":"it1","baseRevision":1,
         "patch":[{"op":"replace","path":"/iterationConfig/iteratorSelector","value":["start","reordered"]}]})).unwrap();
+    let nested = serde_json::from_value(json!({"runId":"other","nodeRunId":"it1","baseRevision":1,
+        "patch":[{"op":"replace","path":"/iterationConfig/iteratorSelector","value":["start","envelope","items"]}]})).unwrap();
+    assert!(matches!(
+        store.preview(&nested, impact),
+        Err(DatabaseError::WorkflowDebug(DebugRejection::InvalidPatch { path, .. }))
+            if path == "/iterationConfig/iteratorSelector"
+    ));
     let container = store.preview(&container_request, impact).unwrap();
     assert_eq!(
         container.member_configurations.unwrap()["agent"]["agentConfig"]["prompt"],
