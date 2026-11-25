@@ -10,6 +10,7 @@ import {
   type WorkflowDebugPreview,
 } from "@ora/contracts";
 import { localizeContractError } from "../../i18n/contract-error";
+import { RunDebugAttempt } from "./run-debug-attempt";
 import { useWorkflowDebugHistory } from "../../state/data/workflow-runs";
 import {
   RunNodeConfigForm,
@@ -17,6 +18,21 @@ import {
 } from "../workflow-editor/run-node-config-form";
 
 type FormInput = Omit<RunNodeConfigFormProps, "onCancel" | "onSubmit">;
+
+function positionKey({ target }: FormInput) {
+  if ("nodeRunId" in target)
+    return JSON.stringify([target.runId, target.nodeRunId]);
+  const { rootScopeId, scopeId, nodeId, containerNodeRunId, index } =
+    target.pendingTarget;
+  return JSON.stringify([
+    target.runId,
+    rootScopeId,
+    scopeId,
+    nodeId,
+    containerNodeRunId,
+    index,
+  ]);
+}
 /** Inputs are scoped to the current run by the data owner, including undispatched positions. */
 export interface RunDebugSession {
   runId: string;
@@ -97,6 +113,7 @@ function Edit({
   const [ticket, setTicket] = useState<Ticket>();
   const [receipt, setReceipt] = useState<WorkflowDebugOperation>();
   const [error, setError] = useState<string>();
+  const [refreshError, setRefreshError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
   const operation =
@@ -108,6 +125,7 @@ function Edit({
     lock.current = true;
     setBusy(true);
     setError(undefined);
+    setRefreshError(undefined);
     try {
       const preview = await session.preview(edit);
       setTicket({
@@ -130,16 +148,25 @@ function Edit({
     lock.current = true;
     setBusy(true);
     setError(undefined);
+    setRefreshError(undefined);
     try {
       setReceipt(await session.commit(current.request));
     } catch (e) {
-      setError(localizeContractError(e, t));
-      if (e instanceof RemoteContractError) setTicket(undefined);
+      if (
+        e instanceof RemoteContractError &&
+        e.code.startsWith("workflow_debug_")
+      ) {
+        setTicket(undefined);
+        setError(localizeContractError(e, t));
+      } else {
+        // Delivery can fail after acceptance. A retry must replay the original request key.
+        setError(t("workflowRun.debug.uncertain"));
+      }
     } finally {
       try {
         await session.refresh();
       } catch (e) {
-        setError(localizeContractError(e, t));
+        setRefreshError(localizeContractError(e, t));
       }
       lock.current = false;
       setBusy(false);
@@ -147,7 +174,8 @@ function Edit({
   }
   return (
     <div className="space-y-2">
-      {error && <p role="alert">{error}</p>}
+      {error && !operation && <p role="alert">{error}</p>}
+      {refreshError && <p role="alert">{refreshError}</p>}
       {operation ? (
         <Operation operation={operation} />
       ) : ticket ? (
@@ -173,7 +201,13 @@ function Edit({
   );
 }
 
-function History({ entries }: { entries: WorkflowDebugHistoryEntry[] }) {
+function History({
+  entries,
+  runId,
+}: {
+  entries: WorkflowDebugHistoryEntry[];
+  runId: string;
+}) {
   const { t } = useTranslation();
   return (
     <>
@@ -191,7 +225,14 @@ function History({ entries }: { entries: WorkflowDebugHistoryEntry[] }) {
                 <Operation operation={e.operation} />
                 <Impact preview={e.preview} />
                 <pre>{JSON.stringify(e.patch, null, 2)}</pre>
-                {e.firstNodeRunId}
+                {Array.from(
+                  new Set([e.preview.target.nodeRunId, e.firstNodeRunId]),
+                ).map(
+                  (id) =>
+                    id && (
+                      <RunDebugAttempt key={id} runId={runId} nodeRunId={id} />
+                    ),
+                )}
               </details>
             </li>
           ))}
@@ -230,7 +271,7 @@ function PersistedHistory({ runId }: { runId: string }) {
   const query = useWorkflowDebugHistory(runId);
   return (
     <div className="max-h-[60vh] space-y-3 overflow-auto border-b p-3 text-sm">
-      {query.data && <History entries={query.data} />}{" "}
+      {query.data && <History entries={query.data} runId={runId} />}
       {query.isPending && <p role="status">{t("workflowRun.loading")}</p>}
       {query.error && (
         <p role="alert">{localizeContractError(query.error, t)}</p>
@@ -253,8 +294,7 @@ export function RunDebugPanel({ session }: { session: RunDebugSession }) {
   const positions = session.positions.filter(
     (p) => p.input.target.runId === session.runId,
   );
-  const key = (p: FormInput) => JSON.stringify(p.target);
-  const input = positions.find((p) => key(p.input) === selected)?.input;
+  const input = positions.find((p) => positionKey(p.input) === selected)?.input;
   return (
     <section
       className="max-h-[60vh] space-y-3 overflow-auto border-b p-3 text-sm"
@@ -268,11 +308,22 @@ export function RunDebugPanel({ session }: { session: RunDebugSession }) {
         >
           <option value="">—</option>
           {positions.map((p) => (
-            <option key={key(p.input)} value={key(p.input)}>
+            <option key={positionKey(p.input)} value={positionKey(p.input)}>
               {p.label} ·{" "}
               {"nodeRunId" in p.input.target
                 ? p.input.target.nodeRunId
-                : p.input.target.pendingTarget.scopeId}
+                : [
+                    p.input.target.pendingTarget.scopeId,
+                    p.input.target.pendingTarget.nodeId,
+                    p.input.target.pendingTarget.containerNodeRunId,
+                    p.input.target.pendingTarget.index == null
+                      ? null
+                      : t("workflowRun.debug.item", {
+                          item: p.input.target.pendingTarget.index + 1,
+                        }),
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
             </option>
           ))}
         </select>
@@ -285,7 +336,7 @@ export function RunDebugPanel({ session }: { session: RunDebugSession }) {
           onCancel={() => select("")}
         />
       )}
-      <History entries={session.history} />
+      <History entries={session.history} runId={session.runId} />
       <Button
         size="sm"
         variant="outline"

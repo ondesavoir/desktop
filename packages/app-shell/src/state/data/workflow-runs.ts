@@ -113,6 +113,15 @@ export function useWorkflowDebugHistory(runId: string) {
   });
 }
 
+export function useWorkflowDebugAttempt(runId: string, nodeRunId: string) {
+  const client = useContractsClient();
+  return useQuery({
+    queryKey: [...workflowRunKeys.detail(runId), "debugAttempt", nodeRunId],
+    queryFn: ({ signal }) =>
+      client.workflowRun.debugAttempt({ runId, nodeRunId }, { signal }),
+  });
+}
+
 /** Lists the persisted workflow runs of one project. */
 export function useWorkflowRunsByProject(
   projectId: string | null | undefined,
