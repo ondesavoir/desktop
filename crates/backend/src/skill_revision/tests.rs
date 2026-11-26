@@ -428,3 +428,185 @@ async fn a_change_invalidates_what_every_agent_offered() {
         );
     }
 }
+
+/// Fails `change` once its package reached the disk, the row write being refused, and returns how
+/// far that advanced the revision from the last discovery, checking that the next discovery has
+/// that revision and that the package was put back.
+fn advance_of_a_failed_change(change: impl FnOnce(&SkillApi, &str) -> bool) -> u64 {
+    let skills = Skills::new();
+    let api = skills.api();
+    let created = api.create(create("review")).unwrap().skill;
+    let catalog = skills.catalog();
+    let manifest = skills.root().join("review").join("SKILL.md");
+    let content = fs::read(&manifest).unwrap();
+    // Every row write fails from here on, after the package was swapped in or moved aside.
+    rusqlite::Connection::open(skills.directory.path().join("ora.sqlite3"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER refuse_updates BEFORE UPDATE ON skills BEGIN SELECT RAISE(ABORT, 'refused'); END;
+             CREATE TRIGGER refuse_inserts BEFORE INSERT ON skills BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+        )
+        .unwrap();
+    catalog
+        .skill_catalog(&WorkspaceId::new("workspace"))
+        .unwrap();
+    let discovered = catalog.revision();
+
+    assert!(change(&api, &created.id), "the change fails");
+    let advanced = skills.advanced_from(discovered);
+    catalog
+        .skill_catalog(&WorkspaceId::new("workspace"))
+        .unwrap();
+    assert_eq!(
+        catalog.revision(),
+        discovered + advanced,
+        "the next discovery"
+    );
+    assert_eq!(fs::read(&manifest).unwrap(), content, "the package is back");
+    assert!(!skills.root().join("audit").exists());
+    advanced
+}
+
+/// Asks for the Skill to be saved under `name`, with `content` if given.
+fn save(skill_id: &str, name: &str, content: Option<&str>) -> UpdateSkillRequest {
+    UpdateSkillRequest {
+        skill_id: skill_id.to_string(),
+        name: name.to_string(),
+        description: "Reviews changes".to_string(),
+        content: content.map(str::to_string),
+    }
+}
+
+/// An edit in place swaps its new package in before the row is written: discovery in between may
+/// have read it under the revision that is current again after the rollback, so that is counted.
+#[test]
+fn an_edit_rolled_back_after_its_swap_advances_the_revision() {
+    ora_logging::with_trace_logging(|| {
+        let advanced = advance_of_a_failed_change(|api, id| {
+            api.update(save(id, "review", Some("Other instructions")))
+                .is_err()
+        });
+        assert_eq!(advanced, 1);
+    });
+}
+
+/// A rename moves the package to its new name before the row is written, so its rollback is
+/// counted too.
+#[test]
+fn a_rename_rolled_back_after_its_swap_advances_the_revision() {
+    ora_logging::with_trace_logging(|| {
+        let advanced =
+            advance_of_a_failed_change(|api, id| api.update(save(id, "audit", None)).is_err());
+        assert_eq!(advanced, 1);
+    });
+}
+
+/// A delete moves the package aside before the row is written: discovery in between may have
+/// found the Skill missing, so its rollback is counted.
+#[test]
+fn a_delete_rolled_back_after_its_move_advances_the_revision() {
+    ora_logging::with_trace_logging(|| {
+        let advanced = advance_of_a_failed_change(|api, id| {
+            api.delete(DeleteSkillRequest {
+                skill_id: id.to_string(),
+            })
+            .is_err()
+        });
+        assert_eq!(advanced, 1);
+    });
+}
+
+/// A create whose row is refused is not counted: discovery only reads packages that have a row, so
+/// nobody saw the package it removes again.
+#[test]
+fn a_create_rolled_back_leaves_the_revision_alone() {
+    ora_logging::with_trace_logging(|| {
+        let advanced = advance_of_a_failed_change(|api, _| api.create(create("audit")).is_err());
+        assert_eq!(advanced, 0);
+    });
+}
+
+/// A package that breaks or comes back without a commit is counted when the settings list it, as
+/// when a session's catalog reads it, and a commit is not counted again by the next list.
+#[test]
+fn the_settings_list_notices_another_set_of_available_skills() {
+    ora_logging::with_trace_logging(|| {
+        let skills = Skills::new();
+        let api = skills.api();
+        api.create(create("review")).unwrap();
+        let list = || {
+            let before = skills.revision.current();
+            api.list(ora_contracts::ListSkillsRequest {}).unwrap();
+            skills.advanced_from(before)
+        };
+        assert_eq!([list(), list()], [0, 0], "the commit was counted");
+
+        let manifest = skills.root().join("review").join("SKILL.md");
+        let content = fs::read(&manifest).unwrap();
+        fs::remove_file(&manifest).unwrap();
+        assert_eq!([list(), list()], [1, 0], "it stopped being available");
+        fs::write(&manifest, content).unwrap();
+        assert_eq!([list(), list()], [1, 0], "it is available again");
+    });
+}
+
+/// The settings and the sessions read the same Skills, local and from a plugin, as the same set:
+/// neither counts a change for what the other one already saw.
+#[test]
+fn the_settings_and_the_sessions_count_a_change_once() {
+    ora_logging::with_trace_logging(|| {
+        let skills = Skills::new();
+        let api = skills.api();
+        api.create(create("review")).unwrap();
+        let package = skills.directory.path().join("plugin").join("audit");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("SKILL.md"),
+            "---\nname: audit\ndescription: Audits\n---\nInstructions",
+        )
+        .unwrap();
+        let projection = PluginSkillProjection {
+            name: "audit".to_string(),
+            description: "Audits".to_string(),
+            package_root: package,
+        };
+        skills
+            .repository()
+            .replace_plugin_skills(
+                &PluginId::new("official", "review").unwrap(),
+                "1.0.0",
+                &[projection],
+                1,
+            )
+            .unwrap();
+        let catalog = skills.catalog();
+        let look = || {
+            let before = skills.revision.current();
+            catalog
+                .skill_catalog(&WorkspaceId::new("workspace"))
+                .unwrap();
+            skills.advanced_from(before)
+        };
+        let list = || {
+            let before = skills.revision.current();
+            api.list(ora_contracts::ListSkillsRequest {}).unwrap();
+            skills.advanced_from(before)
+        };
+        assert_eq!([look(), list(), look(), list()], [0, 0, 0, 0]);
+
+        let manifest = skills.root().join("review").join("SKILL.md");
+        let content = fs::read(&manifest).unwrap();
+        fs::remove_file(&manifest).unwrap();
+        assert_eq!(
+            [list(), look(), list()],
+            [1, 0, 0],
+            "the settings saw it first"
+        );
+        fs::write(&manifest, content).unwrap();
+        assert_eq!(
+            [look(), list(), look()],
+            [1, 0, 0],
+            "a session saw it first"
+        );
+    });
+}

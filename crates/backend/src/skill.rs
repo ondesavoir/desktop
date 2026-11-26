@@ -1,6 +1,7 @@
 use crate::BackendError;
 use crate::clock::SystemClock;
-use crate::skill_revision::{CountedSkillRepository, SkillRevision};
+use crate::skill_catalog::skill_package_dir;
+use crate::skill_revision::{CountedSkillRepository, CountedSkillStorage, SkillRevision};
 use ora_application::{
     CreateSkillHandler, DeleteSkillHandler, FilesystemSkillStorage, GetSkillHandler,
     ListSkillsHandler, NoopSkillImportProgressPublisher, SkillImportConfig, SkillImportService,
@@ -14,30 +15,32 @@ use ora_contracts::{
     PrepareSkillImportRequest, PrepareSkillImportResponse, UpdateSkillRequest, UpdateSkillResponse,
 };
 use ora_db::{RepositoryPool, SqliteSkillRepository};
+use ora_utils::path::strip_verbatim_prefix;
 use std::path::PathBuf;
 
 #[cfg(test)]
 mod package_tests;
 
+/// The package storage the settings change Skills through.
+type Storage = CountedSkillStorage<FilesystemSkillStorage>;
+
 /// Groups the concrete skill handlers and import service shared by runtime adapters.
 pub struct SkillApi {
-    create: CreateSkillHandler<
-        CountedSkillRepository,
-        FilesystemSkillStorage,
-        UuidSkillIdGenerator,
-        SystemClock,
-    >,
-    get: GetSkillHandler<CountedSkillRepository, FilesystemSkillStorage>,
-    list: ListSkillsHandler<CountedSkillRepository, FilesystemSkillStorage>,
-    update: UpdateSkillHandler<CountedSkillRepository, FilesystemSkillStorage, SystemClock>,
-    delete: DeleteSkillHandler<CountedSkillRepository, FilesystemSkillStorage, SystemClock>,
+    create: CreateSkillHandler<CountedSkillRepository, Storage, UuidSkillIdGenerator, SystemClock>,
+    get: GetSkillHandler<CountedSkillRepository, Storage>,
+    list: ListSkillsHandler<CountedSkillRepository, Storage>,
+    update: UpdateSkillHandler<CountedSkillRepository, Storage, SystemClock>,
+    delete: DeleteSkillHandler<CountedSkillRepository, Storage, SystemClock>,
     import: SkillImportService<
         CountedSkillRepository,
-        FilesystemSkillStorage,
+        Storage,
         UuidSkillImportIdGenerator,
         SystemClock,
         NoopSkillImportProgressPublisher,
     >,
+    revision: SkillRevision,
+    /// The local packages' root, as the sessions' catalog spells it.
+    skills_root: PathBuf,
 }
 
 impl SkillApi {
@@ -48,8 +51,12 @@ impl SkillApi {
         revision: SkillRevision,
         clock: SystemClock,
     ) -> Self {
-        let repository = CountedSkillRepository::new(SqliteSkillRepository::new(pool), revision);
-        let storage = FilesystemSkillStorage::new(skills_root.clone());
+        let repository =
+            CountedSkillRepository::new(SqliteSkillRepository::new(pool), revision.clone());
+        let storage = CountedSkillStorage::new(
+            FilesystemSkillStorage::new(skills_root.clone()),
+            revision.clone(),
+        );
 
         Self {
             create: CreateSkillHandler::new(
@@ -64,12 +71,17 @@ impl SkillApi {
             delete: DeleteSkillHandler::new(repository.clone(), storage, clock),
             import: SkillImportService::new(
                 repository,
-                FilesystemSkillStorage::new(skills_root),
+                CountedSkillStorage::new(
+                    FilesystemSkillStorage::new(skills_root.clone()),
+                    revision.clone(),
+                ),
                 UuidSkillImportIdGenerator,
                 clock,
                 NoopSkillImportProgressPublisher,
                 SkillImportConfig::default(),
             ),
+            revision,
+            skills_root: strip_verbatim_prefix(&skills_root),
         }
     }
 
@@ -84,8 +96,23 @@ impl SkillApi {
     }
 
     /// Executes skill listing through the application handler.
+    ///
+    /// What it found available is observed like a session's catalog read, so a package that broke
+    /// or came back without a commit invalidates the discovered commands once the settings show it.
     pub fn list(&self, request: ListSkillsRequest) -> Result<ListSkillsResponse, BackendError> {
-        self.list.handle(request).map_err(BackendError::from)
+        // Read first: a change that lands while the packages are read is counted on its own.
+        let revision = self.revision.current();
+        self.list
+            .handle_observed(request, |available| {
+                self.revision.observed(
+                    revision,
+                    available
+                        .iter()
+                        .map(|skill| skill_package_dir(&self.skills_root, skill).join("SKILL.md"))
+                        .collect(),
+                );
+            })
+            .map_err(BackendError::from)
     }
 
     /// Executes skill replacement through the application handler.
